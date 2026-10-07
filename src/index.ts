@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import type { AssistantMessage, Message, Part } from "@opencode-ai/sdk"
 import os from "node:os"
 import path from "node:path"
+import { spawn } from "node:child_process"
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 
 type SummaryModel = {
@@ -33,6 +34,7 @@ type TTSPluginConfig = {
   summaryModel?: string
   edge_tts?: {
     command?: string[]
+    player?: string
     voice?: string
     rate?: string
     volume?: string
@@ -43,6 +45,7 @@ const spokenAssistantMessages = new Set<string>()
 const inFlightSessions = new Set<string>()
 const latestAssistantMessageBySession = new Map<string, { messageID: string; providerID?: string; modelID?: string }>()
 const assistantTextByMessage = new Map<string, string>()
+let currentPlayback: ReturnType<typeof spawn> | undefined
 
 let ttsMode: "full" | "summary" = "summary"
 let ttsEnabled = true
@@ -74,8 +77,28 @@ function stripThinkingTags(value: string) {
     .replace(/<\/?reflection>/gi, " ")
 }
 
+function stripMarkdown(value: string) {
+  return value
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/\\([<>])/g, "$1")
+    .replace(/＞/g, ">")
+    .replace(/＜/g, "<")
+    .replace(/```[\s\S]*?```/g, " 代码片段。 ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/[*_~#|]+/g, "")
+    .replace(/\r?\n{2,}/g, "。")
+    .replace(/\r?\n/g, "，")
+}
+
 function sanitizeForSpeech(value: string) {
-  return normalizeText(stripThinkingTags(value))
+  return normalizeText(stripMarkdown(stripThinkingTags(value)))
 }
 
 function stripJsonComments(value: string) {
@@ -91,11 +114,68 @@ function logLine(message: string, extra?: unknown) {
   try {
     const config = getPluginConfig()
     if (!config.debug) return
+    mkdirSync(path.dirname(LOG_PATH), { recursive: true })
     const suffix = extra === undefined ? "" : ` ${JSON.stringify(extra)}`
     appendFileSync(LOG_PATH, `${new Date().toISOString()} ${message}${suffix}\n`)
   } catch {
     // Ignore logging failures.
   }
+}
+
+function stopCurrentPlayback() {
+  const child = currentPlayback
+  if (!child) return false
+  currentPlayback = undefined
+  try {
+    child.kill()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function runFile(command: string, args: string[], options?: { playback?: boolean }) {
+  return new Promise<{ exitCode: number; stderr: string }>((resolve) => {
+    const child = spawn(command, args, { windowsHide: true })
+    if (options?.playback) currentPlayback = child
+    let stderr = ""
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString()
+    })
+    child.on("error", (error) => {
+      if (options?.playback && currentPlayback === child) currentPlayback = undefined
+      resolve({ exitCode: -1, stderr: error.message })
+    })
+    child.on("close", (code) => {
+      if (options?.playback && currentPlayback === child) currentPlayback = undefined
+      resolve({ exitCode: code ?? 0, stderr })
+    })
+  })
+}
+
+async function findPythonCommand() {
+  const candidates = process.platform === "win32" ? ["py", "python", "python3"] : ["python3", "python"]
+  for (const candidate of candidates) {
+    const args = candidate === "py" ? ["-3", "--version"] : ["--version"]
+    const check = await runFile(candidate, args)
+    if (check.exitCode === 0) return candidate === "py" ? ["py", "-3"] : [candidate]
+  }
+  return undefined
+}
+
+async function ensureEdgeTtsSpawn() {
+  const venvCheck = await runFile(VENV_PYTHON, ["-c", "import edge_tts"])
+  if (venvCheck.exitCode === 0) return
+
+  const python = await findPythonCommand()
+  if (!python) throw new Error("python not found; install Python or configure edge_tts.command")
+
+  mkdirSync(OPENCODE_DIR, { recursive: true })
+  const venvSetup = await runFile(python[0], [...python.slice(1), "-m", "venv", VENV_DIR])
+  if (venvSetup.exitCode !== 0) throw new Error(`python venv setup failed: ${venvSetup.stderr}`)
+
+  const install = await runFile(VENV_PYTHON, ["-m", "pip", "install", "--quiet", "edge-tts"])
+  if (install.exitCode !== 0) throw new Error(`edge-tts install failed: ${install.stderr}`)
 }
 
 function normalizePluginConfig(config?: TTSPluginConfig): TTSPluginConfig {
@@ -136,6 +216,14 @@ function getPluginConfig() {
     currentPluginConfig = loadPluginConfigFromDisk()
   }
   return currentPluginConfig
+}
+
+function refreshRuntimeConfig() {
+  const config = loadPluginConfigFromDisk()
+  setPluginConfig(config)
+  ttsMode = config.mode ?? "summary"
+  ttsEnabled = config.enabled !== false
+  return config
 }
 
 async function findPython(shell: Parameters<Plugin>[0]["$"]): Promise<string | undefined> {
@@ -384,6 +472,57 @@ async function runTts(
   const backend = config.backend ?? "edge_tts"
 
   if (backend === "edge_tts") {
+    if (process.platform === "win32") {
+      await ensureEdgeTtsSpawn()
+      const command = config.edge_tts?.command ?? VENV_EDGE_TTS_COMMAND
+      const edgeVoice = voice ?? config.voice ?? config.edge_tts?.voice ?? DEFAULT_EDGE_TTS_VOICE
+      const rate = config.edge_tts?.rate ?? DEFAULT_EDGE_TTS_RATE
+      const volume = config.edge_tts?.volume ?? DEFAULT_EDGE_TTS_VOLUME
+      const outputPath = path.join(
+        os.tmpdir(),
+        `opencode-tts-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`,
+      )
+
+      try {
+        logLine("tts.normalized", { text: normalized })
+        logLine("tts.edge_tts.win32.start", { command, voice: edgeVoice, rate, volume, outputPath })
+        const tts = await runFile(command[0], [
+          ...command.slice(1),
+          "--voice",
+          edgeVoice,
+          "--rate",
+          rate,
+          "--volume",
+          volume,
+          "--text",
+          normalized,
+          "--write-media",
+          outputPath,
+        ])
+        if (tts.exitCode !== 0) {
+          logLine("tts.edge_tts.win32.failed", tts)
+          throw new Error(`edge_tts exited with code ${tts.exitCode}`)
+        }
+
+        const player = config.edge_tts?.player ?? "ffplay"
+        const play = await runFile(player, ["-nodisp", "-autoexit", "-loglevel", "quiet", outputPath], {
+          playback: true,
+        })
+        if (play.exitCode !== 0) {
+          logLine("tts.playback.win32.failed", { player, ...play })
+          throw new Error(`ffplay exited with code ${play.exitCode}; install ffmpeg or configure edge_tts.player`)
+        }
+        logLine("tts.playback.win32.success", { outputPath })
+        return
+      } finally {
+        try {
+          unlinkSync(outputPath)
+        } catch {
+          // Ignore cleanup failures for temp audio files.
+        }
+      }
+    }
+
     const command = await resolveEdgeTtsCommand(shell, config.edge_tts?.command)
     const edgeVoice = voice ?? config.voice ?? config.edge_tts?.voice ?? DEFAULT_EDGE_TTS_VOICE
     const rate = config.edge_tts?.rate ?? DEFAULT_EDGE_TTS_RATE
@@ -405,20 +544,20 @@ async function runTts(
       logLine("tts.edge_tts.generated", { outputPath })
 
       if (process.platform === "darwin") {
-        await shell`/usr/bin/afplay ${outputPath}`.quiet()
+        await runFile("/usr/bin/afplay", [outputPath], { playback: true })
         logLine("tts.playback.afplay.success", { outputPath })
         return
       }
 
       const ffplay = await shell`command -v ffplay`.nothrow().quiet()
       if (ffplay.exitCode === 0) {
-        await shell`ffplay -nodisp -autoexit -loglevel quiet ${outputPath}`.quiet()
+        await runFile("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet", outputPath], { playback: true })
         return
       }
 
       const mpg123 = await shell`command -v mpg123`.nothrow().quiet()
       if (mpg123.exitCode === 0) {
-        await shell`mpg123 -q ${outputPath}`.quiet()
+        await runFile("mpg123", ["-q", outputPath], { playback: true })
         return
       }
 
@@ -435,22 +574,22 @@ async function runTts(
   const sayVoice = voice ?? config.voice
   if (process.platform === "darwin") {
     if (sayVoice) {
-      await shell`/usr/bin/say -v ${sayVoice} ${normalized}`.quiet()
+      await runFile("/usr/bin/say", ["-v", sayVoice, normalized], { playback: true })
       return
     }
-    await shell`/usr/bin/say ${normalized}`.quiet()
+    await runFile("/usr/bin/say", [normalized], { playback: true })
     return
   }
 
   const spdSay = await shell`command -v spd-say`.nothrow().quiet()
   if (spdSay.exitCode === 0) {
-    await shell`spd-say ${normalized}`.quiet()
+    await runFile("spd-say", [normalized], { playback: true })
     return
   }
 
   const espeak = await shell`command -v espeak`.nothrow().quiet()
   if (espeak.exitCode === 0) {
-    await shell`espeak ${normalized}`.quiet()
+    await runFile("espeak", [normalized], { playback: true })
     return
   }
 
@@ -495,7 +634,7 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
   ttsEnabled = initialConfig.enabled !== false
 
   return {
-    event: async ({ event }) => {
+    event: async ({ event }: any) => {
       logLine("event.received", { type: event.type })
 
       if (event.type === "message.updated") {
@@ -542,7 +681,8 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
           ? { providerID: latest.providerID, modelID: latest.modelID }
           : undefined
 
-        if (!ttsEnabled) return
+        const runtimeConfig = refreshRuntimeConfig()
+        if (runtimeConfig.enabled === false) return
 
         let summary: string
         if (ttsMode === "full") {
@@ -575,37 +715,94 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
         inFlightSessions.delete(sessionID)
       }
     },
-    config: async (input) => {
+    config: async (input: any) => {
       if (!input.command) input.command = {}
       for (const cmd of TTS_COMMANDS) {
         input.command[cmd.name] = { description: cmd.description, template: cmd.template }
       }
     },
-    "command.execute.before": async (cmdInput) => {
+    "desktop.ui.actions": async (_input: any, output: any) => {
+      refreshRuntimeConfig()
+      output.actions.push(
+        {
+          id: "tts.speak-message",
+          location: "assistant-message",
+          label: "朗读",
+          icon: "play",
+        },
+        {
+          id: "tts.stop",
+          location: "assistant-message",
+          label: "停止",
+          icon: "stop",
+        },
+        {
+          id: "tts.toggle",
+          location: "composer",
+          label: ttsEnabled ? "TTS 开" : "TTS 关",
+          icon: ttsEnabled ? "volume" : "volume-off",
+          active: ttsEnabled,
+        },
+      )
+    },
+    "desktop.ui.action": async (input: any, output: any) => {
+      if (input.id === "tts.toggle") {
+        ttsEnabled = !ttsEnabled
+        savePluginConfig({ enabled: ttsEnabled })
+        output.handled = true
+        return
+      }
+
+      if (input.id === "tts.stop") {
+        stopCurrentPlayback()
+        output.handled = true
+        return
+      }
+
+      if (input.id === "tts.speak-message") {
+        const text = input.text?.trim()
+        if (text) {
+          stopCurrentPlayback()
+          runTts(pluginInput.$, text).catch((err) => logLine("desktop.tts-speak.error", serializeUnknown(err)))
+        }
+        output.handled = true
+      }
+    },
+    "command.execute.before": async (cmdInput: any, cmdOutput: any) => {
       if (!cmdInput.command.startsWith("tts-")) return
+      const output = cmdOutput as { parts?: Part[] }
+      const handled = (message: string) => {
+        if (Array.isArray(output.parts)) {
+          output.parts.splice(0, output.parts.length, { type: "text", text: message } as Part)
+        }
+      }
 
       if (cmdInput.command === "tts-mode-summary") {
         ttsMode = "summary"
         savePluginConfig({ mode: "summary" })
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-mode-full") {
         ttsMode = "full"
         savePluginConfig({ mode: "full" })
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-on") {
         ttsEnabled = true
         savePluginConfig({ enabled: true })
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-off") {
         ttsEnabled = false
         savePluginConfig({ enabled: false })
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-speak") {
@@ -615,7 +812,8 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
             logLine("tts-speak.error", serializeUnknown(err))
           })
         }
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-repeat") {
@@ -632,7 +830,8 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
             speak.catch((err) => logLine("tts-repeat.error", serializeUnknown(err)))
           }
         }
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
 
       if (cmdInput.command === "tts-uninstall") {
@@ -673,10 +872,11 @@ export const OpenCodeTTSPlugin: Plugin = async (pluginInput) => {
         } catch { /* best effort */ }
 
         console.log("[opencode-tts] Plugin files removed. Please restart opencode.")
-        throw new Error("Command handled by TTS plugin")
+        handled("TTS 已处理。")
+        return
       }
     },
-  }
+  } as any
 }
 
 export default OpenCodeTTSPlugin

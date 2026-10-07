@@ -1,118 +1,85 @@
-# opencode-tts
+# opencode-tts-speak
 
-An [OpenCode](https://opencode.ai) plugin that automatically speaks assistant responses when a session goes idle.
+An OpenCode TTS plugin that speaks assistant responses when a session goes idle.
 
-https://github.com/user-attachments/assets/cf1c3166-dbd7-43b8-8215-1ea12d336463
+This fork focuses on:
 
-## How it works
-
-The plugin listens for session idle events and automatically:
-
-1. Captures the latest assistant message
-2. Either summarizes it (default) or uses the full text (configurable)
-3. Converts it to speech using a local TTS engine
+- Windows desktop compatibility
+- natural Markdown cleanup before speech
+- safe slash-command handling without server-error popups
+- `edge-tts` playback through `ffplay`
 
 ## Install
 
-Tell OpenCode:
+Install as an OpenCode plugin:
 
-```text
-Install plugin opencode-tts
+```bash
+opencode plugin opencode-tts-speak
 ```
 
-Or add to your OpenCode config (`~/.config/opencode/opencode.json`):
+Or point OpenCode at a local checkout:
 
 ```json
 {
-  "plugin": ["opencode-tts"]
+  "plugin": ["file:///D:/Code/opencode-plugins/opencode-tts-speak/dist/index.js"]
 }
 ```
 
-## Modes
+Then restart OpenCode.
 
-- **summary** (default): Auto-speaks a summarized version of each response
-- **full**: Auto-speaks the complete response text
+## Commands
 
-## User controls
+- `/tts-on`
+- `/tts-off`
+- `/tts-mode-summary`
+- `/tts-mode-full`
+- `/tts-speak <text>`
+- `/tts-repeat`
+- `/tts-uninstall`
 
-Use these slash commands to manage TTS behavior:
+If your OpenCode build does not show these commands, copy the files in `command/` to:
 
-| Command | Effect |
-| --- | --- |
-| `/tts-mode-summary` | Switch to summary mode (default) |
-| `/tts-mode-full` | Switch to full text mode |
-| `/tts-on` | Enable automatic TTS |
-| `/tts-off` | Disable automatic TTS |
-| `/tts-speak <text>` | Speak arbitrary text immediately |
-| `/tts-repeat` | Re-speak the last response in the current session |
-| `/tts-uninstall` | Remove plugin files and clean up `opencode.json` |
-
-Mode and status changes persist across sessions.
+```text
+~/.config/opencode/command/
+```
 
 ## Configuration
 
-Plugin settings live in `~/.config/opencode/plugins/opencode-tts.jsonc`:
+Create or edit:
+
+```text
+~/.config/opencode/plugins/opencode-tts.jsonc
+```
+
+Example:
 
 ```jsonc
 {
-  "enabled": true,          // false to disable TTS — persisted across sessions
-  "mode": "summary",        // "summary" | "full" — persisted across sessions
+  "enabled": true,
+  "mode": "full",
   "debug": false,
-  "backend": "edge_tts",    // "edge_tts" | "say"
-  "voice": "...",           // voice override for the active backend
-  "summaryLength": "2 sentences", // free-text length hint passed to the LLM (e.g. "30 words", "3 short sentences")
-  "summaryProvider": "...", // provider ID for the summary model
-  "summaryModel": "...",    // model ID for the summary model
+  "backend": "edge_tts",
+  "voice": "zh-CN-XiaoxiaoNeural",
+  "summaryLength": "2 sentences",
   "edge_tts": {
-    "voice": "en-US-AvaNeural",
-    "rate": "+25%",
-    "volume": "+0%"
+    "voice": "zh-CN-XiaoxiaoNeural",
+    "rate": "+0%",
+    "volume": "+0%",
+    "player": "D:\\NoSQL\\ffmpeg\\ffplay.exe"
   }
 }
 ```
 
-The plugin auto-installs `edge-tts` into a managed Python venv at `~/.config/opencode/tts-venv` on first use.
+On Windows, install `ffplay` from FFmpeg and either put it on `PATH` or set `edge_tts.player`.
 
-### Summary model
+## Markdown Cleanup
 
-The plugin resolves the model for summary generation in this order:
+Before speech, the plugin removes Markdown formatting such as headings, bold markers, links, lists, quotes, and code fences. It preserves comparison symbols such as `>` and `<`, so math like `9.7 > 9.11` is still spoken naturally by the TTS engine.
 
-1. `summaryProvider` + `summaryModel` from the plugin config
-2. `small_model` from your OpenCode config
-3. The same model that produced the assistant response
-4. Text fallback: first 40 words of the raw response
-
-## TTS backends
-
-**`edge_tts`** (default): Uses Microsoft Edge's neural TTS. Auto-installed. Requires an audio player: `afplay` (macOS built-in), `ffplay`, or `mpg123`.
-
-The default voice is `en-US-AvaNeural`, which is recommended for English. Edge TTS supports a wide range of languages and locales — you can use any multilingual voice (e.g. `en-US-AvaMultilingualNeural`) or switch to a completely different language (e.g. `it-IT-ElsaNeural` for Italian, `fr-FR-DeniseNeural` for French). Run `edge-tts --list-voices` to see all available voices.
-
-**`say`**: Uses macOS `say` or Linux `spd-say`/`espeak`. No install needed.
-
-To use a custom edge-tts executable:
-
-```jsonc
-{
-  "edge_tts": {
-    "command": ["python3", "-m", "edge_tts"]
-  }
-}
-```
-
-## Local development
-
-Build:
+## Development
 
 ```bash
 npm install
 npm run build
-```
-
-Checkout and point to local plugin:
-
-```json
-{
-  "plugin": ["file:///path/to/opencode-tts/dist/index.js"]
-}
+npm run typecheck
 ```

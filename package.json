@@ -1,14 +1,23 @@
 {
-  "name": "opencode-tts",
+  "name": "opencode-tts-speak",
   "version": "2.0.0",
-  "description": "OpenCode plugin that speaks short AI summaries instead of full responses",
+  "description": "OpenCode TTS plugin with Windows playback fixes and natural Markdown speech cleanup",
+  "homepage": "https://github.com/12343954/opencode-tts-speak#readme",
+  "bugs": {
+    "url": "https://github.com/12343954/opencode-tts-speak/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/12343954/opencode-tts-speak.git"
+  },
   "type": "module",
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "command"
   ],
   "scripts": {
     "build": "node build.mjs",
@@ -20,7 +29,9 @@
     "plugin",
     "tts",
     "text-to-speech",
-    "summary"
+    "summary",
+    "windows",
+    "speech"
   ],
   "license": "MIT",
   "dependencies": {
