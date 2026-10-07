@@ -87,3 +87,26 @@ npm install
 npm run build
 npm run typecheck
 ```
+
+## Release
+
+Create a short-lived npm granular access token with package read/write permission and "Bypass two-factor authentication (2FA)" enabled, then publish:
+
+```powershell
+npm config set //registry.npmjs.org/:_authToken "YOUR_NPM_TOKEN"
+npm run pack:check
+npm run release:patch
+npm config delete //registry.npmjs.org/:_authToken
+```
+
+For a minor version:
+
+```powershell
+npm run release:minor
+```
+
+After publishing, verify:
+
+```powershell
+npm view opencode-tts-speak version --registry=https://registry.npmjs.org/
+```

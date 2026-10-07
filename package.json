@@ -22,7 +22,10 @@
   "scripts": {
     "build": "node build.mjs",
     "prepare": "node build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "release:patch": "npm run typecheck && npm run pack:check && npm version patch && git push --follow-tags && npm publish --registry=https://registry.npmjs.org/",
+    "release:minor": "npm run typecheck && npm run pack:check && npm version minor && git push --follow-tags && npm publish --registry=https://registry.npmjs.org/"
   },
   "keywords": [
     "opencode",
