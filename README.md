@@ -21,7 +21,7 @@ Or point OpenCode at a local checkout:
 
 ```json
 {
-  "plugin": ["file:///D:/Code/opencode-plugins/opencode-tts-speak/dist/index.js"]
+  "plugin": ["file:///absolute/path/to/opencode-tts-speak/dist/index.js"]
 }
 ```
 
@@ -65,7 +65,7 @@ Example:
     "voice": "zh-CN-XiaoxiaoNeural",
     "rate": "+0%",
     "volume": "+0%",
-    "player": "D:\\NoSQL\\ffmpeg\\ffplay.exe"
+    "player": "C:\\path\\to\\ffplay.exe"
   }
 }
 ```
