@@ -76,6 +76,10 @@ On Windows, install `ffplay` from FFmpeg and either put it on `PATH` or set `edg
 
 Before speech, the plugin removes Markdown formatting such as headings, bold markers, links, lists, quotes, and code fences. It preserves comparison symbols such as `>` and `<`, so math like `9.7 > 9.11` is still spoken naturally by the TTS engine.
 
+## Acknowledgements
+
+This project was inspired by [StefanoChiodino/opencode-tts](https://github.com/StefanoChiodino/opencode-tts). Thanks to Stefano Chiodino for the original idea and implementation.
+
 ## Development
 
 ```bash
